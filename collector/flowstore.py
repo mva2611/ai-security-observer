@@ -3,9 +3,12 @@
 import json
 import sqlite3
 import sys
+import time
 
 
 BATCH_SIZE = 500
+SQLITE_TIMEOUT = 0.25
+RETRY_DELAYS = (1, 2, 4)
 
 PROTOCOLS = {
     "ICMP": 1,
@@ -126,8 +129,27 @@ def insert_batch(db, batch):
         for flow in batch
     ]
 
-    with db:
-        db.executemany(sql, rows)
+    attempts = 1 + len(RETRY_DELAYS)
+
+    for attempt in range(attempts):
+        try:
+            with db:
+                db.executemany(sql, rows)
+            return
+        except sqlite3.OperationalError as exc:
+            if "database is locked" not in str(exc).lower():
+                raise
+
+            if attempt >= len(RETRY_DELAYS):
+                raise
+
+            delay = RETRY_DELAYS[attempt]
+            print(
+                f"database locked; retrying in {delay}s "
+                f"(attempt {attempt + 2}/{attempts})",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
 
 
 def main():
@@ -141,7 +163,7 @@ def main():
     invalid = 0
     batch = []
 
-    with sqlite3.connect(db_path) as db:
+    with sqlite3.connect(db_path, timeout=SQLITE_TIMEOUT) as db:
         try:
             validate_database(db)
         except (sqlite3.Error, RuntimeError) as exc:
