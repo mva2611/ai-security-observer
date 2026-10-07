@@ -62,22 +62,39 @@ def insert_flow(db, flow):
 
 
 def main():
-    if len(sys.argv) != 3:
-        print("usage: flowstore.py DATABASE JSON_FILE", file=sys.stderr)
+    if len(sys.argv) != 2:
+        print("usage: flowstore.py DATABASE", file=sys.stderr)
         return 2
 
     db_path = sys.argv[1]
-    json_path = sys.argv[2]
-
-    with open(json_path, "r", encoding="utf-8") as handle:
-        record = json.load(handle)
-
-    flow = normalize(record)
+    received = 0
+    written = 0
+    invalid = 0
 
     with sqlite3.connect(db_path) as db:
-        insert_flow(db, flow)
+        for line_number, line in enumerate(sys.stdin, start=1):
+            line = line.strip()
+            if not line:
+                continue
 
-    print("flow written")
+            received += 1
+
+            try:
+                record = json.loads(line)
+                flow = normalize(record)
+                insert_flow(db, flow)
+                written += 1
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                invalid += 1
+                print(
+                    f"invalid record at line {line_number}: {exc}",
+                    file=sys.stderr,
+                )
+
+    print(
+        f"received={received} written={written} invalid={invalid}",
+        file=sys.stderr,
+    )
     return 0
 
 
