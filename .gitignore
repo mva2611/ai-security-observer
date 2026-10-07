@@ -3,3 +3,7 @@ data/
 *.db-shm
 *.db-wal
 .env
+
+# Python
+__pycache__/
+*.py[cod]
