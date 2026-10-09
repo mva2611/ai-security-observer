@@ -1,0 +1,15 @@
+services:
+  collector:
+    image: ai-security-observer-collector:0.2
+    container_name: ai-security-observer-collector
+    network_mode: host
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./data:/data
