@@ -1,0 +1,22 @@
+services:
+  collector-nat-test:
+    image: ai-security-observer-collector:0.3-nat-flush
+    container_name: ai-security-observer-collector-nat-test
+    network_mode: bridge
+    restart: "no"
+    stop_grace_period: 15s
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:12056:12055/udp"
+    volumes:
+      - nat-test-data:/data
+
+volumes:
+  nat-test-data:
+    name: ai-security-observer-nat-test-data

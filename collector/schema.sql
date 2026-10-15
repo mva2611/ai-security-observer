@@ -29,7 +29,12 @@ CREATE TABLE IF NOT EXISTS flows (
     packets               INTEGER,
     tcp_flags             INTEGER,
 
-    observation_domain_id INTEGER
+    observation_domain_id INTEGER,
+
+    post_nat_src_ip       TEXT,
+    post_nat_dst_ip       TEXT,
+    post_napt_src_port    INTEGER,
+    post_napt_dst_port    INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_flows_received

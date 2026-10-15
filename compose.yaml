@@ -1,9 +1,10 @@
 services:
   collector:
-    image: ai-security-observer-collector:0.2
+    image: ${COLLECTOR_IMAGE:-ai-security-observer-collector:0.3-nat-flush}
     container_name: ai-security-observer-collector
     network_mode: host
     restart: unless-stopped
+    stop_grace_period: 15s
     read_only: true
     tmpfs:
       - /tmp

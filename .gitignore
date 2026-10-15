@@ -3,6 +3,7 @@ data/
 *.db-shm
 *.db-wal
 .env
+test-fixtures/
 
 # Python
 __pycache__/

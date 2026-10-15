@@ -5,8 +5,10 @@ FROM python:3.13-alpine
 WORKDIR /app
 
 COPY --from=goflow2 /goflow2 /usr/local/bin/goflow2
+COPY goflow2-mapping.yaml /app/goflow2-mapping.yaml
 COPY flowstore.py /app/flowstore.py
 COPY schema.sql /app/schema.sql
+COPY migrate_flowstore_nat.py /app/migrate_flowstore_nat.py
 COPY entrypoint.sh /app/entrypoint.sh
 
 RUN addgroup -S collector \

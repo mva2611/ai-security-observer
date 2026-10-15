@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 
 import json
+import queue
 import sqlite3
 import sys
+import threading
 import time
 
 
 BATCH_SIZE = 500
+BATCH_FLUSH_SECONDS = 5.0
 SQLITE_TIMEOUT = 0.25
 RETRY_DELAYS = (1, 2, 4)
+EOF = object()
+
+
+class ReaderFailure:
+    def __init__(self, error):
+        self.error = error
 
 PROTOCOLS = {
     "ICMP": 1,
@@ -38,6 +47,10 @@ COLUMNS = (
     "packets",
     "tcp_flags",
     "observation_domain_id",
+    "post_nat_src_ip",
+    "post_nat_dst_ip",
+    "post_napt_src_port",
+    "post_napt_dst_port",
 )
 
 
@@ -55,6 +68,9 @@ def normalize(record):
             raise ValueError(f"unknown protocol: {proto!r}")
 
     return {
+        # NAT columns are a backward-compatible nullable extension. Keeping
+        # version 1 permits rollback to the original 0.2 collector without
+        # discarding flows ingested after migration.
         "schema_version": 1,
         "received_at_ns": record["time_received_ns"],
         "exporter_ip": record["sampler_address"],
@@ -75,6 +91,12 @@ def normalize(record):
         "packets": record.get("packets"),
         "tcp_flags": record.get("tcp_flags"),
         "observation_domain_id": record.get("observation_domain_id"),
+        # get() deliberately preserves JSON numeric zero while mapping an
+        # absent key to SQL NULL.
+        "post_nat_src_ip": record.get("post_nat_src_addr"),
+        "post_nat_dst_ip": record.get("post_nat_dst_addr"),
+        "post_napt_src_port": record.get("post_napt_src_port"),
+        "post_napt_dst_port": record.get("post_napt_dst_port"),
     }
 
 
@@ -152,17 +174,96 @@ def insert_batch(db, batch):
             time.sleep(delay)
 
 
+def process_stream(
+    db,
+    stream,
+    *,
+    batch_size=BATCH_SIZE,
+    flush_seconds=BATCH_FLUSH_SECONDS,
+):
+    """Consume JSONL without leaving a partial batch blocked on stdin."""
+    lines = queue.Queue(maxsize=batch_size * 2)
+
+    def read_lines():
+        try:
+            for line in stream:
+                lines.put(line)
+        except Exception as exc:
+            lines.put(ReaderFailure(exc))
+        finally:
+            lines.put(EOF)
+
+    reader = threading.Thread(target=read_lines, name="flowstore-stdin", daemon=True)
+    reader.start()
+
+    received = 0
+    written = 0
+    invalid = 0
+    line_number = 0
+    batch = []
+    batch_started = None
+
+    def flush():
+        nonlocal written, batch_started
+        if not batch:
+            return
+        count = len(batch)
+        # Do not clear the in-memory batch until the transaction succeeds.
+        insert_batch(db, batch)
+        written += count
+        batch.clear()
+        batch_started = None
+
+    while True:
+        timeout = None
+        if batch_started is not None:
+            timeout = max(0.0, flush_seconds - (time.monotonic() - batch_started))
+
+        try:
+            item = lines.get(timeout=timeout)
+        except queue.Empty:
+            flush()
+            continue
+
+        if item is EOF:
+            break
+        if isinstance(item, ReaderFailure):
+            raise item.error
+
+        line_number += 1
+        line = item.strip()
+        if not line:
+            continue
+
+        received += 1
+        try:
+            record = json.loads(line)
+            flow = normalize(record)
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            invalid += 1
+            print(
+                f"invalid record at line {line_number}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+
+        if not batch:
+            batch_started = time.monotonic()
+        batch.append(flow)
+
+        if len(batch) >= batch_size:
+            flush()
+
+    flush()
+    return received, written, invalid
+
+
 def main():
     if len(sys.argv) != 2:
         print("usage: flowstore.py DATABASE", file=sys.stderr)
         return 2
 
     db_path = sys.argv[1]
-    received = 0
-    written = 0
-    invalid = 0
-    batch = []
-
     with sqlite3.connect(db_path, timeout=SQLITE_TIMEOUT) as db:
         try:
             validate_database(db)
@@ -173,33 +274,7 @@ def main():
             )
             return 1
 
-        for line_number, line in enumerate(sys.stdin, start=1):
-            line = line.strip()
-            if not line:
-                continue
-
-            received += 1
-
-            try:
-                record = json.loads(line)
-                flow = normalize(record)
-                batch.append(flow)
-            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-                invalid += 1
-                print(
-                    f"invalid record at line {line_number}: {exc}",
-                    file=sys.stderr,
-                )
-                continue
-
-            if len(batch) >= BATCH_SIZE:
-                insert_batch(db, batch)
-                written += len(batch)
-                batch.clear()
-
-        if batch:
-            insert_batch(db, batch)
-            written += len(batch)
+        received, written, invalid = process_stream(db, sys.stdin)
 
     print(
         f"received={received} written={written} invalid={invalid}",
