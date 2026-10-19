@@ -13,6 +13,9 @@ BATCH_FLUSH_SECONDS = 5.0
 SQLITE_TIMEOUT = 0.25
 RETRY_DELAYS = (1, 2, 4)
 EOF = object()
+NANOSECONDS_PER_MILLISECOND = 1_000_000
+MAX_FLOW_AGE_NS = 24 * 60 * 60 * 1_000_000_000
+MAX_FUTURE_SKEW_NS = 5 * 60 * 1_000_000_000
 
 
 class ReaderFailure:
@@ -33,6 +36,7 @@ COLUMNS = (
     "sequence_num",
     "flow_start_ns",
     "flow_end_ns",
+    "flow_time_source",
     "src_ip",
     "dst_ip",
     "src_port",
@@ -54,6 +58,69 @@ COLUMNS = (
 )
 
 
+def valid_flow_interval(start_ns, end_ns, received_at_ns):
+    """Reject incomplete, reversed, future, or implausibly old flow times."""
+    if not all(isinstance(value, int) and not isinstance(value, bool)
+               for value in (start_ns, end_ns, received_at_ns)):
+        return False
+    if start_ns < 0 or end_ns < start_ns:
+        return False
+    if end_ns > received_at_ns + MAX_FUTURE_SKEW_NS:
+        return False
+    if start_ns < received_at_ns - MAX_FLOW_AGE_NS:
+        return False
+    return True
+
+
+def flow_times(record):
+    """Return start, end, and provenance, preferring native IPFIX times."""
+    received_at_ns = record["time_received_ns"]
+    native_start = record.get("time_flow_start_ns")
+    native_end = record.get("time_flow_end_ns")
+
+    if ("native_flow_start_marker" in record
+            and "native_flow_end_marker" in record
+            and valid_flow_interval(native_start, native_end, received_at_ns)):
+        return native_start, native_end, "absolute"
+
+    if ("flow_start_delta_marker" in record
+            and "flow_end_delta_marker" in record
+            and valid_flow_interval(native_start, native_end, received_at_ns)):
+        return native_start, native_end, "reconstructed"
+
+    relative_keys = (
+        "system_init_time_ms",
+        "flow_start_sys_uptime_ms",
+        "flow_end_sys_uptime_ms",
+    )
+    if all(key in record for key in relative_keys):
+        values = tuple(record[key] for key in relative_keys)
+        if all(isinstance(value, int) and not isinstance(value, bool) and value >= 0
+               for value in values):
+            system_init_ms, start_uptime_ms, end_uptime_ms = values
+            reconstructed_start = (
+                system_init_ms + start_uptime_ms
+            ) * NANOSECONDS_PER_MILLISECOND
+            reconstructed_end = (
+                system_init_ms + end_uptime_ms
+            ) * NANOSECONDS_PER_MILLISECOND
+            if valid_flow_interval(
+                reconstructed_start, reconstructed_end, received_at_ns
+            ):
+                return reconstructed_start, reconstructed_end, "reconstructed"
+
+    if valid_flow_interval(native_start, native_end, received_at_ns):
+        return native_start, native_end, "export_fallback"
+
+    # GoFlow2 normally supplies the IPFIX export time in both fields when no
+    # supported timing IE exists. If those fields are missing or malformed,
+    # retain a valid conservative fallback at receive-time second precision.
+    if isinstance(received_at_ns, int) and not isinstance(received_at_ns, bool):
+        fallback_ns = (received_at_ns // 1_000_000_000) * 1_000_000_000
+        return fallback_ns, fallback_ns, "export_fallback"
+    return None, None, "export_fallback"
+
+
 def normalize(record):
     if record.get("type") != "IPFIX":
         raise ValueError("record is not IPFIX")
@@ -67,6 +134,8 @@ def normalize(record):
         except KeyError:
             raise ValueError(f"unknown protocol: {proto!r}")
 
+    flow_start_ns, flow_end_ns, flow_time_source = flow_times(record)
+
     return {
         # NAT columns are a backward-compatible nullable extension. Keeping
         # version 1 permits rollback to the original 0.2 collector without
@@ -75,8 +144,9 @@ def normalize(record):
         "received_at_ns": record["time_received_ns"],
         "exporter_ip": record["sampler_address"],
         "sequence_num": record.get("sequence_num"),
-        "flow_start_ns": record.get("time_flow_start_ns"),
-        "flow_end_ns": record.get("time_flow_end_ns"),
+        "flow_start_ns": flow_start_ns,
+        "flow_end_ns": flow_end_ns,
+        "flow_time_source": flow_time_source,
         "src_ip": record["src_addr"],
         "dst_ip": record["dst_addr"],
         "src_port": record.get("src_port"),

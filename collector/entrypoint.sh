@@ -1,15 +1,19 @@
 #!/bin/sh
 set -eu
 
-FIFO=/tmp/goflow2.json
+FIFO=${FLOWSTORE_FIFO:-/tmp/goflow2.json}
+GOFLOW2_BIN=${GOFLOW2_BIN:-/usr/local/bin/goflow2}
+FLOWSTORE_BIN=${FLOWSTORE_BIN:-/app/flowstore.py}
+FLOWSTORE_DB=${FLOWSTORE_DB:-/data/flows.db}
+PYTHON_BIN=${PYTHON_BIN:-python3}
 
 mkfifo "$FIFO"
 
-/usr/local/bin/goflow2 -addr ':18080' -listen 'netflow://:12055/?workers=1' \
+"$GOFLOW2_BIN" -addr ':18080' -listen 'netflow://:12055/?workers=1' \
     -format json -mapping /app/goflow2-mapping.yaml > "$FIFO" &
 GOFLOW_PID=$!
 
-python3 /app/flowstore.py /data/flows.db < "$FIFO" &
+"$PYTHON_BIN" "$FLOWSTORE_BIN" "$FLOWSTORE_DB" < "$FIFO" &
 FLOWSTORE_PID=$!
 
 cleanup() {
@@ -34,13 +38,19 @@ cleanup() {
     rm -f "$FIFO"
 }
 
-trap cleanup EXIT INT TERM
+graceful_shutdown() {
+    # Preserve a successful exit status for an explicit container stop. The
+    # EXIT trap performs the actual child shutdown and final FlowStore flush.
+    exit 0
+}
+
+trap cleanup EXIT
+trap graceful_shutdown INT TERM
 
 while kill -0 "$GOFLOW_PID" 2>/dev/null && kill -0 "$FLOWSTORE_PID" 2>/dev/null; do
     sleep 1
 done
 
-cleanup
-trap - EXIT INT TERM
-
+# A child disappearing without an explicit stop request is a runtime failure.
+# The EXIT trap still tears down its peer and flushes anything recoverable.
 exit 1

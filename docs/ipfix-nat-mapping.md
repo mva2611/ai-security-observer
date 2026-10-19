@@ -4,13 +4,42 @@
 `cmd/goflow2/mapping.yaml`. Its expected SHA-256 is:
 
 ```text
-9e0e900da48e51ed4e1ca0dba5e36403e6fd20e25ba258d2799b6368eb8d4a5f
+964a63ee79628bc4588cb5c3f075b469bf42af5747476b852f42865402c92ff8
 ```
 
 It adds IPFIX Information Elements 225–228 as nullable JSON fields while
 listing every built-in FlowMessage output field. The upstream
 `time_received_ns: datetimenano` renderer is intentionally omitted so the
 existing numeric timestamp contract is preserved.
+
+It also preserves RouterOS relative flow timestamps and the device boot epoch:
+
+| IE | JSON field |
+|---:|---|
+| 21 | `flow_end_sys_uptime_ms` |
+| 22 | `flow_start_sys_uptime_ms` |
+| 160 | `system_init_time_ms` |
+
+GoFlow2's native `time_flow_start_ns` and `time_flow_end_ns` remain unchanged.
+Additional presence markers for IE 150–159 let FlowStore distinguish native
+absolute/delta timestamps from GoFlow2's export-time fallback. FlowStore gives
+valid native absolute timestamps priority, then reconstructs RouterOS times as
+`(system_init_time_ms + flow_*_sys_uptime_ms) * 1_000_000`.
+
+FlowStore rejects reversed intervals, timestamps more than five minutes in the
+future, and starts more than 24 hours before receipt. If native and relative
+time data are incomplete or invalid, it keeps GoFlow2's valid export-time
+fallback; malformed or missing GoFlow2 fallback values are replaced by local
+receive time rounded down to one second and remain labelled `export_fallback`.
+
+The 24-hour bound also applies to offline replay. A historical PCAP can contain
+complete and valid IE 21/22/160 values, while GoFlow2 assigns a new current
+`time_received_ns` during replay. If the reconstructed flow start is then more
+than 24 hours before that new receipt time, FlowStore intentionally stores the
+record as `export_fallback`. This does not mean the relative IEs were absent or
+failed to decode. Use a current-time synthetic packet to test acceptance of
+reconstruction, and use historical replay to verify that the real RouterOS
+fields reach the collector.
 
 | IE | JSON field |
 |---:|---|

@@ -11,6 +11,9 @@ CREATE TABLE IF NOT EXISTS flows (
 
     flow_start_ns         INTEGER,
     flow_end_ns           INTEGER,
+    flow_time_source      TEXT NOT NULL DEFAULT 'export_fallback'
+                          CHECK (flow_time_source IN
+                                 ('absolute', 'reconstructed', 'export_fallback')),
 
     src_ip                TEXT NOT NULL,
     dst_ip                TEXT NOT NULL,

@@ -1,6 +1,6 @@
 services:
   collector:
-    image: ${COLLECTOR_IMAGE:-ai-security-observer-collector:0.3-nat-flush}
+    image: ${COLLECTOR_IMAGE:-ai-security-observer-collector:0.4}
     container_name: ai-security-observer-collector
     network_mode: host
     restart: unless-stopped

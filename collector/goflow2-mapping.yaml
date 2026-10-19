@@ -62,6 +62,13 @@ formatter:
     - post_nat_dst_addr
     - post_napt_src_port
     - post_napt_dst_port
+    - flow_start_sys_uptime_ms
+    - flow_end_sys_uptime_ms
+    - system_init_time_ms
+    - native_flow_start_marker
+    - native_flow_end_marker
+    - flow_start_delta_marker
+    - flow_end_delta_marker
   key:
     - sampler_address
   protobuf: # manual protobuf fields addition
@@ -92,6 +99,27 @@ formatter:
     - name: post_napt_dst_port
       index: 1004
       type: varint
+    - name: flow_start_sys_uptime_ms
+      index: 1005
+      type: varint
+    - name: flow_end_sys_uptime_ms
+      index: 1006
+      type: varint
+    - name: system_init_time_ms
+      index: 1007
+      type: varint
+    - name: native_flow_start_marker
+      index: 1008
+      type: varint
+    - name: native_flow_end_marker
+      index: 1009
+      type: varint
+    - name: flow_start_delta_marker
+      index: 1010
+      type: varint
+    - name: flow_end_delta_marker
+      index: 1011
+      type: varint
   render:
     post_nat_src_addr: ip
     post_nat_dst_addr: ip
@@ -114,6 +142,36 @@ ipfix:
       destination: post_napt_src_port
     - field: 228
       destination: post_napt_dst_port
+    - field: 22
+      destination: flow_start_sys_uptime_ms
+    - field: 21
+      destination: flow_end_sys_uptime_ms
+    - field: 160
+      destination: system_init_time_ms
+    # GoFlow2 exposes a calculated time_flow_* value but does not expose
+    # whether it came from a native absolute IE or its export-time fallback.
+    # These markers retain field presence without changing GoFlow2's native
+    # timestamp conversion.
+    - field: 150
+      destination: native_flow_start_marker
+    - field: 152
+      destination: native_flow_start_marker
+    - field: 154
+      destination: native_flow_start_marker
+    - field: 156
+      destination: native_flow_start_marker
+    - field: 151
+      destination: native_flow_end_marker
+    - field: 153
+      destination: native_flow_end_marker
+    - field: 155
+      destination: native_flow_end_marker
+    - field: 157
+      destination: native_flow_end_marker
+    - field: 158
+      destination: flow_start_delta_marker
+    - field: 159
+      destination: flow_end_delta_marker
 netflowv9:
   mapping:
     - field: 34 # samplingInterval provided within the template

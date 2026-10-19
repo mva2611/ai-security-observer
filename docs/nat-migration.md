@@ -5,6 +5,13 @@ The NAT extension is additive and nullable. Existing and new records retain
 database and ignore the extra columns. This is intentional rollback
 compatibility.
 
+The same fail-closed migration also adds `flow_time_source`. Existing rows
+receive the database default `export_fallback`; their original flow timestamps
+cannot be reconstructed because raw RouterOS IE 21/22/160 values were not
+stored. New rows are labelled `absolute`, `reconstructed`, or
+`export_fallback` by FlowStore. This remains a schema-version-1 additive
+extension for rollback compatibility.
+
 Both the new and original FlowStore accept only stored records with
 `schema_version = 1`. The NAT collector deliberately does not introduce
 version 2: a database containing a version-2 row fails closed, because the
@@ -15,6 +22,10 @@ seconds after its first valid record even when stdin remains open. During an
 orderly container stop, GoFlow2 is stopped first so FIFO EOF reaches FlowStore;
 the 15-second compose grace period covers final commit and the existing SQLite
 lock retry budget.
+
+An explicit `SIGTERM`/`SIGINT` container stop exits with status 0 after this
+flush. If GoFlow2 or FlowStore exits without an explicit stop request, the
+entrypoint still cleans up the peer process but returns a non-zero status.
 
 ## Build immutable images
 

@@ -16,7 +16,7 @@ from pathlib import Path
 from replay_ipfix_pcap import payloads
 
 ROOT = Path(__file__).resolve().parents[1]
-MAPPING_SHA256 = "9e0e900da48e51ed4e1ca0dba5e36403e6fd20e25ba258d2799b6368eb8d4a5f"
+MAPPING_SHA256 = "964a63ee79628bc4588cb5c3f075b469bf42af5747476b852f42865402c92ff8"
 NAT_KEYS = ("post_nat_src_addr", "post_nat_dst_addr", "post_napt_src_port", "post_napt_dst_port")
 
 

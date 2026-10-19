@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed SQLite migration adding nullable NAT flow columns."""
+"""Fail-closed SQLite migration adding NAT and flow-time provenance columns."""
 
 from __future__ import annotations
 
@@ -15,6 +15,16 @@ NAT_COLUMNS = {
     "post_napt_src_port": "INTEGER",
     "post_napt_dst_port": "INTEGER",
 }
+
+TIME_COLUMNS = {
+    "flow_time_source": (
+        "TEXT NOT NULL DEFAULT 'export_fallback' "
+        "CHECK (flow_time_source IN "
+        "('absolute', 'reconstructed', 'export_fallback'))"
+    ),
+}
+
+MIGRATION_COLUMNS = {**NAT_COLUMNS, **TIME_COLUMNS}
 
 
 def integrity_check(db: sqlite3.Connection) -> None:
@@ -56,7 +66,7 @@ def migrate(database: Path, backup: Path) -> str:
             raise RuntimeError(
                 "partial NAT migration detected: " + ", ".join(sorted(present))
             )
-        if present == set(NAT_COLUMNS):
+        if present == set(NAT_COLUMNS) and set(TIME_COLUMNS) <= existing:
             return "already migrated; no backup or changes made"
 
         page_size = db.execute("PRAGMA page_size").fetchone()[0]
@@ -77,17 +87,27 @@ def migrate(database: Path, backup: Path) -> str:
 
         try:
             db.execute("BEGIN IMMEDIATE")
-            for name, column_type in NAT_COLUMNS.items():
-                db.execute(f"ALTER TABLE flows ADD COLUMN {name} {column_type}")
+            for name, column_type in MIGRATION_COLUMNS.items():
+                if name not in existing:
+                    db.execute(f"ALTER TABLE flows ADD COLUMN {name} {column_type}")
             db.commit()
         except Exception:
             db.rollback()
             raise
 
         integrity_check(db)
-        missing = set(NAT_COLUMNS) - table_columns(db)
+        missing = set(MIGRATION_COLUMNS) - table_columns(db)
         if missing:
             raise RuntimeError("migration verification failed: " + ", ".join(sorted(missing)))
+        invalid_sources = db.execute(
+            "SELECT count(*) FROM flows WHERE flow_time_source IS NULL "
+            "OR flow_time_source NOT IN "
+            "('absolute', 'reconstructed', 'export_fallback')"
+        ).fetchone()[0]
+        if invalid_sources:
+            raise RuntimeError(
+                f"migration verification failed: {invalid_sources} invalid flow_time_source rows"
+            )
 
     return f"migration complete; backup={backup}"
 
