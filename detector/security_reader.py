@@ -23,12 +23,100 @@ def open_flows_read_only(path):
 
 def open_security(path):
     db = sqlite3.connect(path, timeout=5.0)
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=NORMAL")
     db.execute("PRAGMA foreign_keys=ON")
     db.executescript(SCHEMA.read_text())
+    columns = {row[1] for row in db.execute("PRAGMA table_info(canonical_flows)")}
+    if "processed_at_ns" not in columns:
+        migration_ns = time.time_ns()
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            db.execute("ALTER TABLE canonical_flows ADD COLUMN processed_at_ns INTEGER")
+            db.execute(
+                "UPDATE canonical_flows SET processed_at_ns=? WHERE processed_at_ns IS NULL",
+                (migration_ns,),
+            )
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_canonical_flows_processed_at "
+        "ON canonical_flows(processed_at_ns)"
+    )
+    db.commit()
     return db
 
+
+def _cleanup_canonical_chunk(security, cutoff_ns, limit):
+    return security.execute(
+        "DELETE FROM canonical_flows WHERE flow_signature IN ("
+        "SELECT flow_signature FROM canonical_flows WHERE processed_at_ns<? "
+        "ORDER BY processed_at_ns LIMIT ?)",
+        (cutoff_ns, limit),
+    ).rowcount
+
+
+def run_canonical_cleanup_cycle(
+        security, now_ns, retention_seconds=7 * 24 * 60 * 60,
+        interval_seconds=60 * 60, limit=10_000, max_chunks=100,
+        before_chunk_commit=None):
+    if (retention_seconds <= 0 or interval_seconds <= 0
+            or not 1 <= limit <= 10_000 or max_chunks <= 0):
+        raise ValueError("invalid canonical-flow retention settings")
+    task = "canonical_flows_retention"
+    interval_ns = interval_seconds * 1_000_000_000
+    security.execute("BEGIN IMMEDIATE")
+    try:
+        previous = security.execute(
+            "SELECT last_run_ns FROM detector_maintenance WHERE task_name=?", (task,)
+        ).fetchone()
+        if previous is not None and now_ns - previous[0] < interval_ns:
+            security.rollback()
+            return None
+        security.execute(
+            "INSERT INTO detector_maintenance(task_name,last_run_ns,last_deleted_count) "
+            "VALUES(?,?,0) ON CONFLICT(task_name) DO UPDATE SET "
+            "last_run_ns=excluded.last_run_ns,last_deleted_count=0",
+            (task, now_ns),
+        )
+        security.commit()
+    except BaseException:
+        security.rollback()
+        raise
+
+    cutoff_ns = now_ns - retention_seconds * 1_000_000_000
+    total_deleted = 0
+    for _ in range(max_chunks):
+        security.execute("BEGIN IMMEDIATE")
+        try:
+            deleted = _cleanup_canonical_chunk(security, cutoff_ns, limit)
+            total_deleted += deleted
+            security.execute(
+                "UPDATE detector_maintenance SET last_deleted_count=? WHERE task_name=?",
+                (total_deleted, task),
+            )
+            if before_chunk_commit:
+                before_chunk_commit()
+            security.commit()
+        except BaseException:
+            security.rollback()
+            raise
+        if deleted < limit:
+            break
+    return total_deleted
+
+
+def should_log_progress(count, last_log_at, now_monotonic, heartbeat_seconds):
+    return bool(
+        count or last_log_at is None
+        or now_monotonic - last_log_at >= heartbeat_seconds
+    )
+
+
 def process_batch(flows, security, source_name="flows", batch_size=1000,
-                  before_commit=None, detection_config=None):
+                  before_commit=None, detection_config=None, now_ns=None):
     security.execute("BEGIN IMMEDIATE")
     try:
         row = security.execute(
@@ -42,7 +130,7 @@ def process_batch(flows, security, source_name="flows", batch_size=1000,
         rows = [dict(zip(columns, row)) for row in cursor]
         ids = [row["id"] for row in rows]
         previous = checkpoint
-        detected_at = time.time_ns()
+        detected_at = time.time_ns() if now_ns is None else now_ns
         for flow_id in ids:
             if flow_id > previous + 1:
                 security.execute(
@@ -58,17 +146,37 @@ def process_batch(flows, security, source_name="flows", batch_size=1000,
                 "protocol", "ingress_if", "egress_if", "src_mac", "bytes", "packets",
             }
             if required <= set(columns):
-                process_flows(security, rows, detection_config or DetectionConfig())
+                process_flows(
+                    security, rows, detection_config or DetectionConfig(), detected_at
+                )
             security.execute(
                 "INSERT INTO detector_checkpoints(source_name,last_flow_id,updated_at_ns) VALUES(?,?,?) "
                 "ON CONFLICT(source_name) DO UPDATE SET last_flow_id=excluded.last_flow_id, "
                 "updated_at_ns=excluded.updated_at_ns",
                 (source_name, ids[-1], detected_at),
             )
+        final_checkpoint = ids[-1] if ids else checkpoint
+        previous_health = security.execute(
+            "SELECT last_progress_ns FROM detector_runtime_health WHERE source_name=?",
+            (source_name,),
+        ).fetchone()
+        last_progress = (
+            detected_at if ids or previous_health is None else previous_health[0]
+        )
+        security.execute(
+            "INSERT INTO detector_runtime_health "
+            "(source_name,last_successful_poll_ns,last_progress_ns,last_batch_count,last_checkpoint) "
+            "VALUES(?,?,?,?,?) ON CONFLICT(source_name) DO UPDATE SET "
+            "last_successful_poll_ns=excluded.last_successful_poll_ns,"
+            "last_progress_ns=excluded.last_progress_ns,"
+            "last_batch_count=excluded.last_batch_count,"
+            "last_checkpoint=excluded.last_checkpoint",
+            (source_name, detected_at, last_progress, len(ids), final_checkpoint),
+        )
         if before_commit:
             before_commit()
         security.commit()
-        return len(ids), (ids[-1] if ids else checkpoint)
+        return len(ids), final_checkpoint
     except BaseException:
         security.rollback()
         raise
@@ -87,8 +195,14 @@ def main(argv=None):
     p.add_argument("--r4-destination-threshold",type=int,default=120)
     p.add_argument("--r4-port-threshold",type=int,default=25)
     p.add_argument("--r4-min-flows",type=int,default=20)
+    p.add_argument("--canonical-retention-seconds",type=int,default=604800)
+    p.add_argument("--cleanup-interval-seconds",type=int,default=3600)
+    p.add_argument("--cleanup-limit",type=int,default=10000)
+    p.add_argument("--cleanup-max-chunks",type=int,default=100)
+    p.add_argument("--heartbeat-seconds",type=int,default=300)
     args=p.parse_args(argv)
     with open_flows_read_only(args.flows_db) as flows, open_security(args.security_db) as security:
+        last_log_at = None
         while True:
             config = DetectionConfig(
                 lan_if=args.lan_if, wan_if=args.wan_if,
@@ -100,9 +214,19 @@ def main(argv=None):
                 r4_min_flows=args.r4_min_flows,
             )
             count, checkpoint=process_batch(
-                flows,security,batch_size=args.batch_size,detection_config=config
+                flows,security,batch_size=args.batch_size,detection_config=config,
             )
-            print(f"processed={count} checkpoint={checkpoint}",flush=True)
+            deleted = run_canonical_cleanup_cycle(
+                security, time.time_ns(), args.canonical_retention_seconds,
+                args.cleanup_interval_seconds, args.cleanup_limit,
+                args.cleanup_max_chunks,
+            )
+            if deleted:
+                print(f"maintenance=canonical_flows deleted={deleted}", flush=True)
+            log_now = time.monotonic()
+            if should_log_progress(count, last_log_at, log_now, args.heartbeat_seconds):
+                print(f"processed={count} checkpoint={checkpoint}",flush=True)
+                last_log_at = log_now
             if args.once: return 0
             time.sleep(args.poll_seconds if count == 0 else 0)
 

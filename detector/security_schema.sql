@@ -7,12 +7,27 @@ CREATE TABLE IF NOT EXISTS schema_metadata (
 );
 INSERT OR IGNORE INTO schema_metadata VALUES ('schema_version', '1');
 
+CREATE TABLE IF NOT EXISTS detector_runtime_health (
+    source_name TEXT PRIMARY KEY,
+    last_successful_poll_ns INTEGER NOT NULL,
+    last_progress_ns INTEGER NOT NULL,
+    last_batch_count INTEGER NOT NULL CHECK(last_batch_count >= 0),
+    last_checkpoint INTEGER NOT NULL CHECK(last_checkpoint >= 0)
+);
+
 CREATE TABLE IF NOT EXISTS canonical_flows (
     flow_signature TEXT PRIMARY KEY,
     flow_id INTEGER NOT NULL,
     device_id TEXT NOT NULL,
     direction TEXT NOT NULL CHECK(direction IN ('outbound','inbound')),
-    observed_at_ns INTEGER NOT NULL
+    observed_at_ns INTEGER NOT NULL,
+    processed_at_ns INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS detector_maintenance (
+    task_name TEXT PRIMARY KEY,
+    last_run_ns INTEGER NOT NULL,
+    last_deleted_count INTEGER NOT NULL CHECK(last_deleted_count >= 0)
 );
 
 CREATE TABLE IF NOT EXISTS observed_peers (

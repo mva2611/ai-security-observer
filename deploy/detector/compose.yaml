@@ -1,0 +1,50 @@
+services:
+  detector:
+    image: ${DETECTOR_IMAGE:-ai-security-observer-detector:0.5-test-d1386b0-20261021d}
+    build:
+      context: ../..
+      dockerfile: deploy/detector/Dockerfile
+    container_name: ai-security-observer-detector
+    user: "${DETECTOR_UID:-1026}:${DETECTOR_GID:-100}"
+    network_mode: none
+    restart: unless-stopped
+    stop_grace_period: 15s
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ${FLOW_SOURCE_DIR:?set FLOW_SOURCE_DIR}:/flows:ro
+      - ${SECURITY_STATE_DIR:?set SECURITY_STATE_DIR}:/state:rw
+    environment:
+      BATCH_SIZE: "1000"
+      POLL_SECONDS: "5"
+      LAN_IF: "10"
+      WAN_IF: "8"
+      R2_LEARNING_FLOWS: "1000"
+      R2_LEARNING_SECONDS: "172800"
+      R4_WINDOW_SECONDS: "600"
+      R4_DESTINATION_THRESHOLD: "120"
+      R4_PORT_THRESHOLD: "25"
+      R4_MIN_FLOWS: "20"
+      CANONICAL_RETENTION_SECONDS: "604800"
+      CLEANUP_INTERVAL_SECONDS: "3600"
+      CLEANUP_LIMIT: "10000"
+      CLEANUP_MAX_CHUNKS: "100"
+      HEARTBEAT_SECONDS: "300"
+    healthcheck:
+      test: ["CMD", "python3", "-m", "detector.healthcheck", "/flows/flows.db", "/state/security.db", "--max-poll-age", "90"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    cpu_shares: 512
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

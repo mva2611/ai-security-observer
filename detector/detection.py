@@ -233,6 +233,16 @@ def _r4(db, observation, config):
     width_ns = config.r4_window_seconds * 1_000_000_000
     window_start = observation["timestamp_ns"] - observation["timestamp_ns"] % width_ns
     window_end = window_start + width_ns
+    latest = db.execute(
+        "SELECT last_seen_ns FROM device_observation_state WHERE device_id=?",
+        (observation["device_id"],),
+    ).fetchone()
+    latest_window_start = latest[0] - latest[0] % width_ns if latest else window_start
+    # Canonical signatures expire after seven days.  Never reopen an older R4
+    # window if a very late duplicate arrives after that expiry; records that
+    # are merely out of order inside the current window are still accepted.
+    if window_start < latest_window_start:
+        return
     db.execute(
         "DELETE FROM fanout_observations WHERE device_id=? AND window_start_ns<?",
         (observation["device_id"], window_start),
@@ -281,16 +291,17 @@ def _r4(db, observation, config):
         )
 
 
-def process_flows(db, rows, config):
+def process_flows(db, rows, config, processed_at_ns):
     for row in rows:
         observation = normalize_traffic(row, config)
         if not observation:
             continue
         inserted = db.execute(
-            "INSERT OR IGNORE INTO canonical_flows(flow_signature,flow_id,device_id,direction,observed_at_ns) "
-            "VALUES(?,?,?,?,?)",
+            "INSERT OR IGNORE INTO canonical_flows"
+            "(flow_signature,flow_id,device_id,direction,observed_at_ns,processed_at_ns) "
+            "VALUES(?,?,?,?,?,?)",
             (observation["signature"], observation["flow_id"], observation["device_id"],
-             observation["direction"], observation["timestamp_ns"]),
+             observation["direction"], observation["timestamp_ns"], processed_at_ns),
         ).rowcount
         if (not inserted or observation["direction"] != "outbound"
                 or observation["device_id"] == "unknown"):

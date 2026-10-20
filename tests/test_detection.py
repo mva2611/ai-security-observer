@@ -5,7 +5,10 @@ from unittest import mock
 from pathlib import Path
 
 from detector.detection import DetectionConfig
-from detector.security_reader import main, open_flows_read_only, open_security, process_batch
+from detector.security_reader import (
+    main, open_flows_read_only, open_security, process_batch,
+    run_canonical_cleanup_cycle,
+)
 
 
 FLOW_COLUMNS = """
@@ -60,12 +63,12 @@ class DetectionTest(unittest.TestCase):
                 tuple(values.values()),
             )
 
-    def process(self, batch_size=100):
+    def process(self, batch_size=100, **kwargs):
         self.flows.close()
         self.flows = open_flows_read_only(self.flows_path)
         return process_batch(
             self.flows, self.security, batch_size=batch_size,
-            detection_config=self.config,
+            detection_config=self.config, **kwargs,
         )
 
     def events(self, rule):
@@ -278,6 +281,75 @@ class DetectionTest(unittest.TestCase):
         self.add(25, "8.8.8.8", 10024, src_port=51024)
         self.process(batch_size=100)
         self.assertEqual(len(self.events("R4")), 1)
+
+    def test_late_duplicate_after_retention_does_not_create_second_r4_event(self):
+        processing_ns = 1_800_000_000_000_000_000
+        destinations = ("8.8.8.8", "9.9.9.9", "1.1.1.1")
+        for index, destination in enumerate(destinations, 1):
+            self.add(index, destination, 10_000 + index, src_port=50_000 + index)
+        self.process(now_ns=processing_ns)
+        self.assertEqual(len(self.events("R4")), 1)
+        self.assertEqual(
+            self.security.execute("SELECT count(*) FROM canonical_flows").fetchone()[0], 3
+        )
+
+        after_retention = processing_ns + 8 * 24 * 60 * 60 * 1_000_000_000
+        run_canonical_cleanup_cycle(self.security, after_retention)
+        self.assertEqual(
+            self.security.execute("SELECT count(*) FROM canonical_flows").fetchone()[0], 0
+        )
+
+        for index, destination in enumerate(destinations, 4):
+            original = index - 3
+            self.add(
+                index, destination, 10_000 + original,
+                src_port=50_000 + original,
+            )
+        self.process(now_ns=after_retention + 1_000_000_000)
+        self.assertEqual(len(self.events("R4")), 1)
+        self.assertEqual(
+            self.security.execute(
+                "SELECT count(*) FROM event_evidence WHERE event_id IN "
+                "(SELECT event_id FROM security_events WHERE rule_id='R4')"
+            ).fetchone()[0], 1,
+        )
+        self.assertEqual(
+            self.security.execute(
+                "SELECT count(*) FROM decisions WHERE event_id IN "
+                "(SELECT event_id FROM security_events WHERE rule_id='R4')"
+            ).fetchone()[0], 1,
+        )
+
+    def test_late_duplicates_cannot_reopen_an_expired_r4_window(self):
+        processing_ns = 1_800_000_000_000_000_000
+        old_flow_ns = 1_700_000_000_000_000_000
+        self.add(1, "8.8.8.8", 10_001, src_port=50_001, timestamp=old_flow_ns)
+        self.add(2, "9.9.9.9", 10_002, src_port=50_002, timestamp=old_flow_ns)
+        self.process(now_ns=processing_ns)
+        self.assertEqual(len(self.events("R4")), 0)
+
+        # A newer observation advances the persistent per-device watermark and
+        # causes the in-memory R4 window table to discard the historical window.
+        newer_flow_ns = old_flow_ns + 20 * 60 * 1_000_000_000
+        self.add(3, "4.2.2.2", 443, src_port=50_003, timestamp=newer_flow_ns)
+        self.process(now_ns=processing_ns + 1_000_000_000)
+        self.assertEqual(
+            self.security.execute(
+                "SELECT count(*) FROM fanout_observations WHERE window_start_ns<?",
+                (newer_flow_ns - newer_flow_ns % (600 * 1_000_000_000),),
+            ).fetchone()[0], 0,
+        )
+
+        after_retention = processing_ns + 8 * 24 * 60 * 60 * 1_000_000_000
+        run_canonical_cleanup_cycle(self.security, after_retention)
+        for index, destination in enumerate(("8.8.8.8", "9.9.9.9", "1.1.1.1"), 4):
+            original = index - 3
+            self.add(
+                index, destination, 10_000 + original,
+                src_port=50_000 + original, timestamp=old_flow_ns,
+            )
+        self.process(now_ns=after_retention + 1_000_000_000)
+        self.assertEqual(len(self.events("R4")), 0)
 
 
 if __name__ == "__main__":
