@@ -7,6 +7,56 @@ CREATE TABLE IF NOT EXISTS schema_metadata (
 );
 INSERT OR IGNORE INTO schema_metadata VALUES ('schema_version', '1');
 
+CREATE TABLE IF NOT EXISTS canonical_flows (
+    flow_signature TEXT PRIMARY KEY,
+    flow_id INTEGER NOT NULL,
+    device_id TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK(direction IN ('outbound','inbound')),
+    observed_at_ns INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS observed_peers (
+    device_id TEXT NOT NULL,
+    peer_group TEXT NOT NULL,
+    protocol INTEGER NOT NULL,
+    external_port INTEGER NOT NULL,
+    first_seen_ns INTEGER NOT NULL,
+    last_seen_ns INTEGER NOT NULL,
+    flow_count INTEGER NOT NULL,
+    PRIMARY KEY(device_id, peer_group, protocol, external_port)
+);
+
+CREATE TABLE IF NOT EXISTS device_observation_state (
+    device_id TEXT PRIMARY KEY,
+    flow_count INTEGER NOT NULL,
+    first_seen_ns INTEGER NOT NULL,
+    last_seen_ns INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS communication_profile_changes (
+    change_key TEXT PRIMARY KEY,
+    device_id TEXT NOT NULL,
+    first_seen_ns INTEGER NOT NULL,
+    last_seen_ns INTEGER NOT NULL,
+    peer_group TEXT NOT NULL,
+    transport_scope TEXT NOT NULL,
+    external_port INTEGER NOT NULL,
+    first_flow_id INTEGER NOT NULL,
+    occurrence_count INTEGER NOT NULL,
+    details_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS fanout_observations (
+    device_id TEXT NOT NULL,
+    window_start_ns INTEGER NOT NULL,
+    flow_signature TEXT NOT NULL UNIQUE,
+    external_ip TEXT NOT NULL,
+    external_port INTEGER,
+    flow_id INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fanout_device_window
+    ON fanout_observations(device_id, window_start_ns);
+
 CREATE TABLE IF NOT EXISTS detector_checkpoints (
     source_name TEXT PRIMARY KEY,
     last_flow_id INTEGER NOT NULL CHECK (last_flow_id >= 0),

@@ -4,6 +4,11 @@ import sqlite3
 import time
 from pathlib import Path
 
+try:
+    from detector.detection import DetectionConfig, process_flows
+except ModuleNotFoundError:  # direct execution: python detector/security_reader.py
+    from detection import DetectionConfig, process_flows
+
 SCHEMA = Path(__file__).with_name("security_schema.sql")
 
 def open_flows_read_only(path):
@@ -22,16 +27,20 @@ def open_security(path):
     db.executescript(SCHEMA.read_text())
     return db
 
-def process_batch(flows, security, source_name="flows", batch_size=1000, before_commit=None):
+def process_batch(flows, security, source_name="flows", batch_size=1000,
+                  before_commit=None, detection_config=None):
     security.execute("BEGIN IMMEDIATE")
     try:
         row = security.execute(
             "SELECT last_flow_id FROM detector_checkpoints WHERE source_name=?", (source_name,)
         ).fetchone()
         checkpoint = row[0] if row else 0
-        ids = [r[0] for r in flows.execute(
-            "SELECT id FROM flows WHERE id>? ORDER BY id LIMIT ?", (checkpoint, batch_size)
-        )]
+        cursor = flows.execute(
+            "SELECT * FROM flows WHERE id>? ORDER BY id LIMIT ?", (checkpoint, batch_size)
+        )
+        columns = [item[0] for item in cursor.description]
+        rows = [dict(zip(columns, row)) for row in cursor]
+        ids = [row["id"] for row in rows]
         previous = checkpoint
         detected_at = time.time_ns()
         for flow_id in ids:
@@ -43,6 +52,13 @@ def process_batch(flows, security, source_name="flows", batch_size=1000, before_
                 )
             previous = flow_id
         if ids:
+            required = {
+                "id", "received_at_ns", "flow_start_ns", "flow_end_ns", "exporter_ip",
+                "observation_domain_id", "src_ip", "dst_ip", "src_port", "dst_port",
+                "protocol", "ingress_if", "egress_if", "src_mac", "bytes", "packets",
+            }
+            if required <= set(columns):
+                process_flows(security, rows, detection_config or DetectionConfig())
             security.execute(
                 "INSERT INTO detector_checkpoints(source_name,last_flow_id,updated_at_ns) VALUES(?,?,?) "
                 "ON CONFLICT(source_name) DO UPDATE SET last_flow_id=excluded.last_flow_id, "
@@ -63,10 +79,29 @@ def main(argv=None):
     p.add_argument("--batch-size",type=int,default=1000)
     p.add_argument("--poll-seconds",type=float,default=5.0)
     p.add_argument("--once",action="store_true")
+    p.add_argument("--lan-if",type=int,default=10)
+    p.add_argument("--wan-if",type=int,default=8)
+    p.add_argument("--r2-learning-flows",type=int,default=1000)
+    p.add_argument("--r2-learning-seconds",type=int,default=172800)
+    p.add_argument("--r4-window-seconds",type=int,default=600)
+    p.add_argument("--r4-destination-threshold",type=int,default=120)
+    p.add_argument("--r4-port-threshold",type=int,default=25)
+    p.add_argument("--r4-min-flows",type=int,default=20)
     args=p.parse_args(argv)
     with open_flows_read_only(args.flows_db) as flows, open_security(args.security_db) as security:
         while True:
-            count, checkpoint=process_batch(flows,security,batch_size=args.batch_size)
+            config = DetectionConfig(
+                lan_if=args.lan_if, wan_if=args.wan_if,
+                r2_learning_flows=args.r2_learning_flows,
+                r2_learning_seconds=args.r2_learning_seconds,
+                r4_window_seconds=args.r4_window_seconds,
+                r4_destination_threshold=args.r4_destination_threshold,
+                r4_port_threshold=args.r4_port_threshold,
+                r4_min_flows=args.r4_min_flows,
+            )
+            count, checkpoint=process_batch(
+                flows,security,batch_size=args.batch_size,detection_config=config
+            )
             print(f"processed={count} checkpoint={checkpoint}",flush=True)
             if args.once: return 0
             time.sleep(args.poll_seconds if count == 0 else 0)
