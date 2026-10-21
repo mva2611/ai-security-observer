@@ -1,5 +1,9 @@
 import sqlite3
+import signal
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -166,6 +170,89 @@ class DetectorRuntimeTest(unittest.TestCase):
                 "SELECT last_deleted_count FROM detector_maintenance"
             ).fetchone()[0], 1
         )
+
+    def test_cleanup_stops_after_committing_current_chunk(self):
+        now = 10 * 24 * 60 * 60 * 1_000_000_000
+        self.security.executemany(
+            "INSERT INTO canonical_flows VALUES(?,?,?,?,?,?)",
+            [(f"old-{i}", i, "unknown", "outbound", 1, 1) for i in range(20_005)],
+        )
+        self.security.commit()
+        stop = False
+
+        def request_stop():
+            nonlocal stop
+            stop = True
+
+        self.assertEqual(
+            run_canonical_cleanup_cycle(
+                self.security, now, before_chunk_commit=request_stop,
+                stop_requested=lambda: stop,
+            ),
+            10_000,
+        )
+        self.assertEqual(
+            self.security.execute("SELECT count(*) FROM canonical_flows").fetchone()[0],
+            10_005,
+        )
+
+    def test_sigterm_exits_zero_and_restart_resumes_checkpoint(self):
+        initialize_checkpoint(self.flows, self.security)
+        self.flows.close()
+        self.security.close()
+        with sqlite3.connect(self.flows_path) as db:
+            db.execute("INSERT INTO flows VALUES(5,5)")
+
+        def start_and_wait(expected_checkpoint):
+            process = subprocess.Popen(
+                [
+                    sys.executable, "-m", "detector.security_reader",
+                    str(self.flows_path), str(self.security_path),
+                    "--poll-seconds", "60",
+                ],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    with sqlite3.connect(self.security_path) as db:
+                        row = db.execute(
+                            "SELECT last_flow_id FROM detector_checkpoints "
+                            "WHERE source_name='flows'"
+                        ).fetchone()
+                    if row and row[0] == expected_checkpoint:
+                        return process
+                except sqlite3.OperationalError:
+                    pass
+                time.sleep(0.02)
+            process.kill()
+            stdout, stderr = process.communicate()
+            self.fail(f"checkpoint did not reach {expected_checkpoint}: {stdout} {stderr}")
+
+        first = start_and_wait(5)
+        first.send_signal(signal.SIGTERM)
+        stdout, stderr = first.communicate(timeout=5)
+        self.assertEqual(first.returncode, 0, stderr)
+        self.assertIn("shutdown=signal checkpoint=5", stdout)
+
+        with sqlite3.connect(self.flows_path) as db:
+            db.execute("INSERT INTO flows VALUES(6,6)")
+        second = start_and_wait(6)
+        second.send_signal(signal.SIGTERM)
+        stdout, stderr = second.communicate(timeout=5)
+        self.assertEqual(second.returncode, 0, stderr)
+        self.assertIn("shutdown=signal checkpoint=6", stdout)
+        with sqlite3.connect(self.security_path) as db:
+            self.assertEqual(db.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+            self.assertEqual(
+                db.execute(
+                    "SELECT last_flow_id FROM detector_checkpoints WHERE source_name='flows'"
+                ).fetchone()[0],
+                6,
+            )
+
+        self.flows = open_flows_read_only(self.flows_path)
+        self.security = open_security(self.security_path)
 
     def test_idle_progress_logging_is_heartbeat_limited(self):
         self.assertTrue(should_log_progress(0, None, 100, 300))

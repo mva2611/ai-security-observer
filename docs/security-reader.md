@@ -76,6 +76,12 @@ checkpoint, so restarts resume from the last committed batch. It fails closed
 if detector evidence exists without a checkpoint. Each later batch commits
 detection state, audit records, runtime health, and checkpoint together.
 
+The reader handles `SIGTERM` and `SIGINT` explicitly. A signal wakes an idle
+reader immediately; if a batch is active, that transaction first commits or
+rolls back through the normal error path. Retention stops after committing its
+current chunk. The process then closes both SQLite connections and exits with
+status zero, so a Docker stop or restart does not require `SIGKILL`.
+
 Copy `deploy/detector/env.example` to an untracked `.env` next to the compose
 file and verify the real Synology paths and numeric UID/GID. Create the state
 directory with access only for that identity. Before starting, build the unique

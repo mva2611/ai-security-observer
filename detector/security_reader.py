@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import argparse
+import signal
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -61,7 +63,7 @@ def _cleanup_canonical_chunk(security, cutoff_ns, limit):
 def run_canonical_cleanup_cycle(
         security, now_ns, retention_seconds=7 * 24 * 60 * 60,
         interval_seconds=60 * 60, limit=10_000, max_chunks=100,
-        before_chunk_commit=None):
+        before_chunk_commit=None, stop_requested=None):
     if (retention_seconds <= 0 or interval_seconds <= 0
             or not 1 <= limit <= 10_000 or max_chunks <= 0):
         raise ValueError("invalid canonical-flow retention settings")
@@ -103,6 +105,8 @@ def run_canonical_cleanup_cycle(
         except BaseException:
             security.rollback()
             raise
+        if stop_requested and stop_requested():
+            break
         if deleted < limit:
             break
     return total_deleted
@@ -201,33 +205,51 @@ def main(argv=None):
     p.add_argument("--cleanup-max-chunks",type=int,default=100)
     p.add_argument("--heartbeat-seconds",type=int,default=300)
     args=p.parse_args(argv)
-    with open_flows_read_only(args.flows_db) as flows, open_security(args.security_db) as security:
-        last_log_at = None
-        while True:
-            config = DetectionConfig(
-                lan_if=args.lan_if, wan_if=args.wan_if,
-                r2_learning_flows=args.r2_learning_flows,
-                r2_learning_seconds=args.r2_learning_seconds,
-                r4_window_seconds=args.r4_window_seconds,
-                r4_destination_threshold=args.r4_destination_threshold,
-                r4_port_threshold=args.r4_port_threshold,
-                r4_min_flows=args.r4_min_flows,
-            )
-            count, checkpoint=process_batch(
-                flows,security,batch_size=args.batch_size,detection_config=config,
-            )
-            deleted = run_canonical_cleanup_cycle(
-                security, time.time_ns(), args.canonical_retention_seconds,
-                args.cleanup_interval_seconds, args.cleanup_limit,
-                args.cleanup_max_chunks,
-            )
-            if deleted:
-                print(f"maintenance=canonical_flows deleted={deleted}", flush=True)
-            log_now = time.monotonic()
-            if should_log_progress(count, last_log_at, log_now, args.heartbeat_seconds):
-                print(f"processed={count} checkpoint={checkpoint}",flush=True)
-                last_log_at = log_now
-            if args.once: return 0
-            time.sleep(args.poll_seconds if count == 0 else 0)
+    stop_event = threading.Event()
+
+    def request_stop(_signum, _frame):
+        stop_event.set()
+
+    previous_handlers = {
+        signum: signal.signal(signum, request_stop)
+        for signum in (signal.SIGTERM, signal.SIGINT)
+    }
+    try:
+        with open_flows_read_only(args.flows_db) as flows, open_security(args.security_db) as security:
+            last_log_at = None
+            while True:
+                config = DetectionConfig(
+                    lan_if=args.lan_if, wan_if=args.wan_if,
+                    r2_learning_flows=args.r2_learning_flows,
+                    r2_learning_seconds=args.r2_learning_seconds,
+                    r4_window_seconds=args.r4_window_seconds,
+                    r4_destination_threshold=args.r4_destination_threshold,
+                    r4_port_threshold=args.r4_port_threshold,
+                    r4_min_flows=args.r4_min_flows,
+                )
+                count, checkpoint=process_batch(
+                    flows,security,batch_size=args.batch_size,detection_config=config,
+                )
+                deleted = None
+                if not stop_event.is_set():
+                    deleted = run_canonical_cleanup_cycle(
+                        security, time.time_ns(), args.canonical_retention_seconds,
+                        args.cleanup_interval_seconds, args.cleanup_limit,
+                        args.cleanup_max_chunks, stop_requested=stop_event.is_set,
+                    )
+                if deleted:
+                    print(f"maintenance=canonical_flows deleted={deleted}", flush=True)
+                log_now = time.monotonic()
+                if should_log_progress(count, last_log_at, log_now, args.heartbeat_seconds):
+                    print(f"processed={count} checkpoint={checkpoint}",flush=True)
+                    last_log_at = log_now
+                if args.once or stop_event.is_set():
+                    if stop_event.is_set():
+                        print(f"shutdown=signal checkpoint={checkpoint}", flush=True)
+                    return 0
+                stop_event.wait(args.poll_seconds if count == 0 else 0)
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
 
 if __name__ == "__main__": raise SystemExit(main())
