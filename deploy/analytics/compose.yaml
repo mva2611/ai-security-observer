@@ -1,0 +1,47 @@
+services:
+  analytics-shadow:
+    image: ${ANALYTICS_IMAGE:?set ANALYTICS_IMAGE}
+    build:
+      context: ../..
+      dockerfile: deploy/analytics/Dockerfile
+    container_name: ai-security-observer-analytics-shadow
+    user: "${ANALYTICS_UID:-1026}:${ANALYTICS_GID:-100}"
+    network_mode: none
+    restart: "on-failure:3"
+    stop_grace_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ${FLOW_SOURCE_DIR:?set FLOW_SOURCE_DIR}:/flows:ro
+      - ${SECURITY_SOURCE_DIR:?set SECURITY_SOURCE_DIR}:/security:ro
+      - ${ANALYTICS_STATE_DIR:?set ANALYTICS_STATE_DIR}:/state:rw
+    environment:
+      BATCH_SIZE: "1000"
+      MAX_BATCHES_PER_CYCLE: "10"
+      POLL_SECONDS: "5"
+      STALE_SECONDS: "90"
+      SECURITY_INTERVAL_SECONDS: "300"
+      METRICS_INTERVAL_SECONDS: "300"
+      SIGNATURE_HORIZON_SECONDS: "604800"
+      CLEANUP_INTERVAL_SECONDS: "3600"
+      CLEANUP_LIMIT: "10000"
+      CLEANUP_MAX_CHUNKS: "100"
+      MAX_DATABASE_BYTES: "1610612736"
+    healthcheck:
+      test: ["CMD", "python3", "-m", "analytics.healthcheck", "/state/analytics.db", "--stale-seconds", "90"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    cpu_shares: 128
+    mem_limit: 192m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
