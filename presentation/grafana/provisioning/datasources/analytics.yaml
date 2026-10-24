@@ -1,0 +1,12 @@
+apiVersion: 1
+deleteDatasources: []
+datasources:
+  - name: Observer Analytics
+    uid: aso-analytics
+    type: frser-sqlite-datasource
+    access: proxy
+    url: ""
+    editable: false
+    jsonData:
+      path: /var/lib/grafana/presentation/analytics.db
+      pathOptions: _pragma=query_only(1)&_pragma=busy_timeout(1000)

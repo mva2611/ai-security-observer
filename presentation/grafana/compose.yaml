@@ -1,0 +1,72 @@
+services:
+  snapshot:
+    image: ${SNAPSHOT_IMAGE:?set SNAPSHOT_IMAGE}
+    build:
+      context: ../..
+      dockerfile: presentation/Dockerfile.snapshot
+    container_name: ai-security-observer-presentation-snapshot
+    user: "1026:100"
+    network_mode: none
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - ${ANALYTICS_STATE_DIR:?set ANALYTICS_STATE_DIR}:/analytics:ro
+      - ${PRESENTATION_DATA_DIR:?set PRESENTATION_DATA_DIR}:/presentation:rw
+    command: ["/analytics/analytics.db","/presentation/analytics.db","--interval","60"]
+    healthcheck:
+      test: ["CMD-SHELL", "test -r /presentation/analytics.db && test $$(($$(date +%s)-$$(stat -c %Y /presentation/analytics.db))) -lt 180"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    mem_limit: 96m
+    cpu_shares: 64
+
+  grafana:
+    image: ${GRAFANA_IMAGE:?set GRAFANA_IMAGE}
+    build:
+      context: ../..
+      dockerfile: presentation/grafana/Dockerfile
+    container_name: ai-security-observer-grafana
+    user: "1026:100"
+    depends_on:
+      snapshot:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:size=32m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    ports:
+      - "${GRAFANA_BIND_IP:?set GRAFANA_BIND_IP}:3000:3000"
+    volumes:
+      - ${GRAFANA_DATA_DIR:?set GRAFANA_DATA_DIR}:/var/lib/grafana:rw
+      - ${PRESENTATION_DATA_DIR:?set PRESENTATION_DATA_DIR}:/var/lib/grafana/presentation:ro
+      - ./provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_DOMAIN: ${GRAFANA_BIND_IP}
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_PLUGINS_CHECK_FOR_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_PATHS_PLUGINS: /opt/grafana-plugins
+      GF_PLUGIN_FRSER_SQLITE_DATASOURCE_BLOCK_LIST: "grafana.db,/etc,/proc,/sys"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:3000/api/health | grep -q '\"database\": \"ok\"'"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    mem_limit: 384m
+    cpu_shares: 128
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}

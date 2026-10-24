@@ -112,8 +112,10 @@ Rozhraní na to musí upozornit a umožnit dohledat originál.
   Modely jsou zatím prázdné, žádná baseline ani prahy se automaticky netrénují.
   Před tréninkem vybrat kvalitní úplná období a schválit politiku driftu.
 
-Grafana ani její datasource/dashboardy nejsou nasazeny. Uvedené pohledy jsou
-kontraktem pro budoucí vícevrstvou prezentaci, ne hotovým dashboardem.
+Grafana, její SQLite datasource a čtyři dashboardy jsou nasazeny jako oddělená
+prezentační vrstva nad konzistentní read-only kopií analytics.db. Podrobný
+provozní kontrakt, externí závislosti a rollback popisuje
+docs/presentation.md.
 
 ## Lokální použití
 
